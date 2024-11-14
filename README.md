@@ -1,7 +1,7 @@
 # Nodepay Autoreferral v1.0
 Automatic referral script for Nodepay Account using captcha solver and proxies.
 ### Tools and components required
-1. Nodepay Account | Register: [https://app.nodepay.ai/register](https://app.nodepay.ai/register?ref=ZUCBuJaIoBXLE6J)
+1. Nodepay Account | Register: [https://app.nodepay.ai/register](https://app.nodepay.ai/register?ref=b9CCMY8a4oj1qtQ)
 2. Proxies Static Residental | [FREE 10 PREMIUM PROXIES](https://www.webshare.io/?referral_code=p7k7whpdu2jg)
 3. Captcha Solvers API keys | [2captcha.com](https://2captcha.com/?from=24541144) | [capmonster.cloud](https://capmonster.cloud/) | [anti-captcha.com](https://getcaptchasolution.com/83xoisyxvn)
 4. VPS or RDP (OPTIONAL)
