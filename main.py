@@ -15,7 +15,7 @@ init(autoreset=True)
 
 def print_banner():
     print(f"\n{Fore.CYAN}{'='*45}")
-    print(f"{Fore.YELLOW}       Nodepay Auto Referral Bot v1.0")
+    print(f"{Fore.YELLOW}       Nodepay Auto Referral Bot")
     print(f"{Fore.YELLOW}       github.com/z0zero")
     print(f"{Fore.YELLOW}       do with your own risk")
     print(f"{Fore.CYAN}{'='*45}\n")
@@ -23,10 +23,10 @@ def print_banner():
 def log_step(message: str, type: str = "info"):
     timestamp = datetime.now().strftime("%H:%M:%S")
     colors = {
-        "info": Fore.CYAN,
-        "success": Fore.GREEN,
-        "error": Fore.RED,
-        "warning": Fore.YELLOW
+        "info": Fore.LIGHTCYAN_EX,
+        "success": Fore.LIGHTGREEN_EX,
+        "error": Fore.LIGHTRED_EX,
+        "warning": Fore.LIGHTYELLOW_EX
     }
     color = colors.get(type, Fore.WHITE)
     prefix = {
@@ -94,14 +94,48 @@ class ProxyManager:
         self.proxies = proxy_list
         self.current_index = -1
         self.total_proxies = len(proxy_list) if proxy_list else 0
+        self.current_session_proxy = None
         
+        if self.total_proxies == 1:
+            log_step("Single proxy detected - will use the same proxy for all requests", "warning")
+        elif self.total_proxies > 1:
+            log_step(f"Multiple proxies detected ({self.total_proxies}) - will rotate proxies", "info")
+        else:
+            log_step("No proxies provided - will run without proxy", "warning")
+    
     def get_next_proxy(self) -> Optional[Dict[str, str]]:
         if not self.proxies:
             return None
         
-        self.current_index = (self.current_index + 1) % self.total_proxies
-        proxy = self.proxies[self.current_index]
-        return {"http": proxy, "https": proxy}
+        if self.total_proxies == 1:
+            proxy = self.proxies[0]
+            self.current_session_proxy = {"http": proxy, "https": proxy}
+            log_step(f"Using single proxy: {proxy}", "warning")
+        else:
+            self.current_index = (self.current_index + 1) % self.total_proxies
+            proxy = self.proxies[self.current_index]
+            self.current_session_proxy = {"http": proxy, "https": proxy}
+            log_step(f"Using proxy: {proxy}", "warning")
+            
+        return self.current_session_proxy
+    
+    def start_new_session(self) -> Optional[Dict[str, str]]:
+        return self.get_next_proxy()
+    
+    def get_session_proxy(self) -> Optional[Dict[str, str]]:
+        return self.current_session_proxy
+
+    def get_current_ip(self) -> str:
+        try:
+            response = requests.get(
+                'https://api64.ipify.org?format=json',
+                proxies=self.current_session_proxy,
+                timeout=30
+            )
+            return response.json()['ip']
+        except Exception as e:
+            log_step(f"Failed to get IP address: {str(e)}", "error")
+            return "Unknown"
 
 class ApiEndpoints:
     BASE_URL = "https://api.nodepay.ai/api"
@@ -115,16 +149,61 @@ class ApiEndpoints:
         LOGIN = "auth/login"
         ACTIVATE = "auth/active-account"
 
-class LoginError(Exception):
-    pass
-
 class ReferralClient:
     def __init__(self, proxy_manager: Optional[ProxyManager] = None):
         self.faker = Faker()
         self.proxy_manager = proxy_manager
         self.current_proxy = None
+        self.current_ip = None
         self.email = None
         self.password = None
+        self.max_retries = 5
+        
+    async def _get_captcha_with_retry(self, captcha_service, step: str = "unknown") -> Optional[str]:
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                log_step(f"Getting captcha token for {step} (attempt {attempt}/{self.max_retries})...", "info")
+                token = await captcha_service.get_captcha_token_async()
+                log_step("Captcha token obtained successfully", "success")
+                return token
+            except Exception as e:
+                log_step(f"Captcha error on attempt {attempt}: {str(e)}", "error")
+                if attempt == self.max_retries:
+                    log_step(f"Failed to get captcha after {self.max_retries} attempts", "error")
+                    raise
+        return None
+
+    async def _register_with_retry(self, register_data: dict) -> Optional[dict]:
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                log_step(f"Registering account (attempt {attempt}/{self.max_retries})...", "info")
+                response = await self._make_request('POST', ApiEndpoints.Auth.REGISTER, register_data)
+                
+                if response.get("success"):
+                    log_step(f"Registration successful: {response.get('msg', 'Success')}", "success")
+                    return response
+                    
+                log_step(f"Registration failed on attempt {attempt}: {response.get('msg', 'Unknown error')}", "error")
+                if attempt == self.max_retries:
+                    return None
+                
+            except Exception as e:
+                log_step(f"Registration error on attempt {attempt}: {str(e)}", "error")
+                if attempt == self.max_retries:
+                    return None
+        return None
+        
+    def _start_new_proxy_session(self):
+        if self.proxy_manager:
+            self.current_proxy = self.proxy_manager.start_new_session()
+            if self.current_proxy:
+                self.current_ip = self.proxy_manager.get_current_ip()
+                log_step(f"Starting new session with IP: {self.current_ip}", "warning")
+    
+    def _get_current_session_proxy(self):
+        if self.proxy_manager:
+            return self.proxy_manager.get_session_proxy()
+        return None
         
     def _generate_credentials(self) -> Tuple[str, str, str]:
         email_domains = ["@gmail.com", "@outlook.com", "@yahoo.com", "@hotmail.com"]
@@ -146,9 +225,8 @@ class ReferralClient:
             self.current_proxy = self.proxy_manager.get_next_proxy()
             if self.current_proxy:
                 proxy_addr = self.current_proxy['http']
-                log_step(f"Using proxy: {proxy_addr}", "info")
-            else:
-                log_step("Tidak ada proxy yang tersedia. Menggunakan koneksi tanpa proxy.", "warning")
+                log_step(f"Using IP: {self.current_ip}", "warning")
+                
     def _get_headers(self, auth_token: Optional[str] = None) -> Dict[str, str]:
         headers = {
             'accept': '*/*',
@@ -193,44 +271,49 @@ class ReferralClient:
             log_step(f"Request failed: {str(e)}", "error")
             return {"success": False, "msg": str(e)}
 
-    async def login(self, captcha_service) -> str:
-        try:
-            log_step("Getting captcha token for login...", "info")
-            captcha_token = await captcha_service.get_captcha_token_async()
-            log_step("Captcha token obtained", "success")
-
-            json_data = {
-                'user': self.email,
-                'password': self.password,
-                'remember_me': True,
-                'recaptcha_token': captcha_token
-            }
-
-            log_step("Attempting login...", "info")
-            response = await self._make_request(
-                method='POST',
-                endpoint=ApiEndpoints.Auth.LOGIN,
-                json_data=json_data
-            )
-
-            if not response.get("success"):
-                msg = response.get("msg", "Unknown login error")
-                log_step(f"Login failed: {msg}", "error")
-                raise LoginError(msg)
-
-            access_token = response['data']['token']
-            log_step("Login successful", "success")
-            return access_token
-
-        except Exception as e:
-            log_step(f"Login error: {str(e)}", "error")
-            raise
-
-    async def activate_account(self, access_token: str, max_retries: int = 3):
-        attempt = 0
-        while attempt < max_retries:
+    async def login(self, captcha_service) -> Optional[str]:
+        for attempt in range(1, self.max_retries + 1):
             try:
-                log_step("Attempting account activation...", "info")
+                log_step(f"Login attempt {attempt} of {self.max_retries}...", "info")
+                
+                captcha_token = await self._get_captcha_with_retry(captcha_service, "login")
+                if not captcha_token:
+                    continue
+                
+                json_data = {
+                    'user': self.email,
+                    'password': self.password,
+                    'remember_me': True,
+                    'recaptcha_token': captcha_token
+                }
+                
+                response = await self._make_request(
+                    method='POST',
+                    endpoint=ApiEndpoints.Auth.LOGIN,
+                    json_data=json_data
+                )
+                
+                if response.get("success"):
+                    access_token = response['data']['token']
+                    log_step("Login successful", "success")
+                    return access_token
+                    
+                msg = response.get("msg", "Unknown login error")
+                log_step(f"Login failed on attempt {attempt}: {msg}", "error")
+                
+                if attempt == self.max_retries:
+                    return None
+                
+            except Exception as e:
+                log_step(f"Login error on attempt {attempt}: {str(e)}", "error")
+                if attempt == self.max_retries:
+                    return None
+        return None
+
+    async def activate_account(self, access_token: str) -> Optional[dict]:
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                log_step(f"Attempting account activation (attempt {attempt}/{self.max_retries})...", "info")
                 response = await self._make_request(
                     method='POST',
                     endpoint=ApiEndpoints.Auth.ACTIVATE,
@@ -241,52 +324,50 @@ class ReferralClient:
                 if response.get("success"):
                     log_step(f"Account activation successful: {response.get('msg', 'Success')}", "success")
                     return response
-                else:
-                    msg = response.get("msg", "Unknown error")
-                    log_step(f"Account activation failed: {msg}", "error")
-                    raise Exception(msg)
+                    
+                log_step(f"Activation failed on attempt {attempt}: {response.get('msg', 'Unknown error')}", "error")
+                if attempt == self.max_retries:
+                    return None
 
             except Exception as e:
-                attempt += 1
                 log_step(f"Activation error on attempt {attempt}: {str(e)}", "error")
-                if attempt < max_retries:
-                    log_step("Mencoba menggunakan proxy baru...", "warning")
-                    self._update_proxy()
-                    await asyncio.sleep(2)  # Tunggu sebentar sebelum mencoba lagi
-                else:
-                    log_step("Maksimum percobaan tercapai. Gagal mengaktifkan akun.", "error")
-                    raise
+                if attempt == self.max_retries:
+                    return None
+        return None
         
     async def process_referral(self, ref_code: str, captcha_service) -> Optional[Dict]:
-        try:
-            username, email, password = self._generate_credentials()
-            log_step(f"Generated credentials for: {email}", "info")
-            
-            log_step("Getting captcha token...", "info")
-            captcha_token = await captcha_service.get_captcha_token_async()
-            log_step("Captcha token obtained", "success")
-            
-            register_data = {
-                'email': email,
-                'password': password,
-                'username': username,
-                'referral_code': ref_code,
-                'recaptcha_token': captcha_token
-            }
-            
-            log_step("Registering account...", "info")
-            register_response = await self._make_request('POST', ApiEndpoints.Auth.REGISTER, register_data)
-            
-            if register_response.get("success"):
-                log_step(f"Registration successful: {register_response.get('msg', 'Success')}", "success")
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                log_step(f"\nStarting referral process (attempt {attempt}/{self.max_retries})...", "info")
+                self._start_new_proxy_session()
+                username, email, password = self._generate_credentials()
+                log_step(f"Generated credentials for: {email}", "info")
+                
+                captcha_token = await self._get_captcha_with_retry(captcha_service, "registration")
+                if not captcha_token:
+                    continue
+                
+                register_data = {
+                    'email': email,
+                    'password': password,
+                    'username': username,
+                    'referral_code': ref_code,
+                    'recaptcha_token': captcha_token
+                }
+                
+                self.current_proxy = self._get_current_session_proxy()
+                
+                register_response = await self._register_with_retry(register_data)
+                if not register_response:
+                    continue
                 
                 access_token = await self.login(captcha_service)
+                if not access_token:
+                    continue
                 
-                try:
-                    activation_response = await self.activate_account(access_token)
-                except Exception as activation_error:
-                    log_step(f"Failed to activate account after retries: {activation_error}", "error")
-                    return None
+                activation_response = await self.activate_account(access_token)
+                if not activation_response:
+                    continue
                 
                 return {
                     "username": username,
@@ -294,16 +375,19 @@ class ReferralClient:
                     "password": password,
                     "referral_code": ref_code,
                     "token": access_token,
+                    "ip_used": self.current_ip,
                     "activation_status": activation_response.get('success', False),
-                    "activation_message": activation_response.get('msg', 'Unknown')
+                    "activation_message": activation_response.get('msg', 'Unknown'),
+                    "attempts_needed": attempt
                 }
-            else:
-                log_step(f"Registration failed: {register_response.get('msg', 'Unknown error')}", "error")
-                return None
 
-        except Exception as e:
-            log_step(f"Error processing referral: {str(e)}", "error")
-            return None
+            except Exception as e:
+                log_step(f"Error on referral attempt {attempt}: {str(e)}", "error")
+                if attempt == self.max_retries:
+                    log_step(f"Referral process failed after {self.max_retries} attempts", "error")
+                    return None
+        
+        return None
 
 async def main():
     print_banner()
@@ -360,6 +444,7 @@ async def main():
             print(f"{Fore.CYAN}Password: {Fore.WHITE}{result['password']}")
             print(f"{Fore.CYAN}Referred to: {Fore.WHITE}{result['referral_code']}")
             print(f"{Fore.CYAN}Token: {Fore.WHITE}{result['token']}")
+            print(f"{Fore.CYAN}IP Used: {Fore.WHITE}{result['ip_used']}")
             successful_referrals.append(result)
             
             with open('accounts.txt', 'a') as f:
@@ -368,13 +453,11 @@ async def main():
                 f.write(f"Username: {result['username']}\n")
                 f.write(f"Referred to: {result['referral_code']}\n")
                 f.write(f"Token: {result['token']}\n")
+                f.write(f"IP Used: {result['ip_used']}\n")
                 f.write(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write("-" * 50 + "\n")
-        
-        if i < num_referrals - 1:
-            delay = random.uniform(2, 5)
-            log_step(f"Waiting {delay:.2f} seconds...", "info")
-            time.sleep(delay)
+            with open('tokens.txt', 'a') as f:
+                f.write(f"{result['token']}\n")
 
     print(f"\n{Fore.CYAN}{'='*45}")
     log_step("Summary:", "info")
